@@ -1,0 +1,282 @@
+#define BLYNK_TEMPLATE_ID "TMPL3ZsVe39j9"
+#define BLYNK_TEMPLATE_NAME "Agribot IoT"
+#define BLYNK_AUTH_TOKEN "_MHv_t_QI7k2wAYIl9zMuhaDRpE1GFez"
+#define BLYNK_PRINT Serial
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+#include <ESP32Servo.h>
+#include <DHT.h>
+#include <HTTPClient.h>
+
+// Blynk credentials
+char auth[] = "_MHv_t_QI7k2wAYIl9zMuhaDRpE1GFez"; 
+char ssid[] = "api";
+char pass[] = "12345678";
+
+// ThingSpeak details
+const char* thingspeak_api_key = "O31HXEPVT7RFV9N1"; // Replace this
+const char* thingspeak_server = "http://api.thingspeak.com/update";
+
+// DHT11 sensor setup
+#define DHTPIN 18
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// Ultrasonic sensor pins
+#define TRIG_PIN 22
+#define ECHO_PIN 27
+
+// Soil moisture sensor pin (Analog)
+#define SOIL_MOISTURE_PIN 34
+
+// Motor and other hardware pins
+int fw1 = 32;
+int bw1 = 33;
+int fw2 = 25;
+int bw2 = 26;
+int pesti  = 15;
+int pump = 19;
+
+Servo myServo1;
+Servo myServo2;
+
+
+BlynkTimer timer;
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize pins
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  pinMode(fw1, OUTPUT);
+  pinMode(bw1, OUTPUT);
+  pinMode(fw2, OUTPUT);
+  pinMode(bw2, OUTPUT);
+  pinMode(pump, OUTPUT);
+  pinMode(pesti, OUTPUT);
+  digitalWrite(pesti, LOW);
+
+  myServo1.attach(21);
+  myServo2.attach(4);
+  
+
+  dht.begin();
+
+  // Connect to WiFi
+  WiFi.begin(ssid, pass);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected");
+
+  Blynk.begin(auth, ssid, pass, "blynk.cloud", 80);
+
+  // Read sensors and send data every 5 seconds
+  timer.setInterval(5000L, readAndSendSensorData);
+}
+
+void loop() {
+  Blynk.run();
+  timer.run();
+}
+
+// Read ultrasonic sensor distance in cm
+long readUltrasonicDistance() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30ms timeout
+
+  // Calculate distance in cm
+  long distance = duration * 0.034 / 2;
+
+  // If no echo received, return -1
+  if (duration == 0) {
+    return -1;
+  }
+  return distance;
+}
+
+void readAndSendSensorData() {
+  // Read DHT11
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+
+  // Read soil moisture analog value (0-4095 for ESP32 ADC)
+  int soilMoistureValue = analogRead(SOIL_MOISTURE_PIN);
+
+  // Read ultrasonic distance
+  long distance = readUltrasonicDistance();
+
+  // Process soil moisture status (threshold example)
+  String soilStatus = (soilMoistureValue < 1500) ? "Wet" : "Dry"; // Adjust threshold if needed
+
+  // Obstacle detection threshold and status
+  const int OBSTACLE_THRESHOLD = 30; // in cm
+  String obstacleStatus;
+
+   if (distance <= OBSTACLE_THRESHOLD) {
+    obstacleStatus = "Detected";
+  } else {
+    obstacleStatus = "Not Detected";
+  }
+
+  // Send to Blynk if DHT values are valid
+  if (!isnan(temperature) && !isnan(humidity)) {
+    Blynk.virtualWrite(V8, temperature);
+    Blynk.virtualWrite(V9, humidity);
+  } else {
+    Serial.println("Failed to read from DHT11 sensor");
+  }
+
+  Blynk.virtualWrite(V10, soilMoistureValue);               // Soil moisture raw value
+   Blynk.virtualWrite(V11, soilStatus);                       // Soil status text
+  Blynk.virtualWrite(V12, obstacleStatus);                   // Obstacle status text
+ Blynk.virtualWrite(V13, distance); // Distance in cm
+  // Debug output
+  Serial.print("Temp: "); Serial.print(temperature); Serial.print(" °C, ");
+  Serial.print("Humidity: "); Serial.print(humidity); Serial.print(" %, ");
+  Serial.print("Soil Moisture: "); Serial.print(soilMoistureValue); Serial.print(", ");
+  Serial.print("Soil Status: "); Serial.print(soilStatus); Serial.print(", ");
+  Serial.print("Distance: "); Serial.print(distance); Serial.print(" cm, ");
+  Serial.print("Obstacle: "); Serial.println(obstacleStatus);
+
+  // Send data to ThingSpeak
+  sendToThingSpeak(temperature, humidity, soilMoistureValue, distance);
+}
+
+// Send data to ThingSpeak via HTTP GET
+void sendToThingSpeak(float temp, float hum, int soilVal, long dist) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = String(thingspeak_server) + "?api_key=" + thingspeak_api_key +
+                 "&field1=" + String(temp) +
+                 "&field2=" + String(hum) +
+                 "&field3=" + String(soilVal) +
+                 "&field4=" + String(dist);
+
+    http.begin(url);
+    int httpCode = http.GET();
+
+    if (httpCode > 0) {
+      String payload = http.getString();
+      Serial.print("ThingSpeak Response: ");
+      Serial.println(payload);
+    } else {
+      Serial.print("ThingSpeak request failed, error: ");
+      Serial.println(httpCode);
+    }
+    http.end();
+  } else {
+    Serial.println("WiFi not connected - ThingSpeak not updated");
+  }
+}
+
+// Existing BLYNK_WRITE handlers for motor control, pump, servo, etc.
+// Add your existing BLYNK_WRITE() functions here exactly as in your original code
+// For example:
+
+BLYNK_WRITE(V0) {
+  int pinstate1 = param.asInt();
+  if (pinstate1 == 1) {
+    digitalWrite(fw1, HIGH);
+    digitalWrite(fw2, HIGH);
+    digitalWrite(bw1, LOW);
+    digitalWrite(bw2, LOW);
+  } else {
+    digitalWrite(fw1, LOW);
+    digitalWrite(fw2, LOW);
+    digitalWrite(bw1, LOW);
+    digitalWrite(bw2, LOW);
+  }
+}
+
+BLYNK_WRITE(V1) {
+  int pinstate2 = param.asInt();
+  if (pinstate2 == 1) {
+    digitalWrite(fw1, LOW);
+    digitalWrite(fw2, LOW);
+    digitalWrite(bw1, HIGH);
+    digitalWrite(bw2, HIGH);
+  } else { 
+    digitalWrite(fw1, LOW);
+    digitalWrite(fw2, LOW);
+    digitalWrite(bw1, LOW);
+    digitalWrite(bw2, LOW);
+  }
+}
+
+BLYNK_WRITE(V2) {
+  int pinstate3 = param.asInt();
+  if (pinstate3 == 1) {
+    digitalWrite(fw1, HIGH);
+    digitalWrite(fw2, LOW);
+    digitalWrite(bw1, LOW);
+    digitalWrite(bw2, HIGH);
+  } else { 
+    digitalWrite(fw1, LOW);
+    digitalWrite(fw2, LOW);
+    digitalWrite(bw1, LOW);
+    digitalWrite(bw2, LOW);
+  }
+}
+
+BLYNK_WRITE(V3) {
+  int pinstate9 = param.asInt();
+  if (pinstate9 == 1) {
+    digitalWrite(fw1, LOW);
+    digitalWrite(fw2, HIGH);
+    digitalWrite(bw1, HIGH);
+    digitalWrite(bw2, LOW);
+  } else {
+    digitalWrite(fw1, LOW);
+    digitalWrite(fw2, LOW);
+    digitalWrite(bw1, LOW);
+    digitalWrite(bw2, LOW);
+  }
+}
+
+BLYNK_WRITE(V4) {
+  int pinstate6=param.asInt();
+  if(pinstate6==1) {
+    digitalWrite(pump,HIGH);
+  } else {
+    digitalWrite(pump,LOW);
+  }
+}
+
+BLYNK_WRITE(V5) {
+  int pinstate5=param.asInt();
+  if(pinstate5==1) {
+    digitalWrite(pesti,HIGH);
+  } else {
+    digitalWrite(pesti,LOW);
+  }
+}
+
+BLYNK_WRITE(V6) {
+  int pinstate4=param.asInt();
+  if(pinstate4==0) {
+    myServo1.write(90);
+  } else {
+    myServo1.write(0);
+  }
+}
+
+BLYNK_WRITE(V7) {
+  int pinstate7=param.asInt();
+  if(pinstate7==0) {
+    myServo2.write(90);
+  } else {
+    myServo2.write(0);
+  }
+}
